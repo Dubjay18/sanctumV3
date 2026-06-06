@@ -1,0 +1,5 @@
+sanctum/
+secrets/
+.env
+bin
+tmp
