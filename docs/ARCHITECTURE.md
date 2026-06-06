@@ -53,3 +53,47 @@ For E2E group encryption, two strategies were considered:
 - **Strategy B** is significantly better at scale. For a room of size $N$, Strategy A requires $N$ public-key encryptions per message send, resulting in $O(N)$ CPU and bandwidth overhead for the client. Strategy B reduces the message payload overhead to $O(1)$ symmetric encryption, with a one-time key distribution overhead of $O(N)$ asymmetric encryptions.
 - **Strategy A** was chosen for the first implementation because of its correctness guarantees and simplicity. It avoids the complexity of symmetric key generation, rotation, tracking membership changes (joins/leaves), and out-of-band key distribution. Verification of correctness is straightforward because each payload is mapped directly to standard pairwise E2E DMs.
 
+### E2E Encryption Sequence Diagrams
+
+#### Direct Message (DM) Encryption Flow
+This diagram illustrates how Alice encrypts a DM for Bob and sends it via the Server.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Alice
+    participant Server
+    actor Bob
+
+    Alice->>Server: HTTP GET /keys/bob
+    Server-->>Alice: Bob's Public Key (bobPubKey)
+    Note over Alice: Encrypt(msg, bobPubKey, alicePrivKey)
+    Alice->>Server: WS Send(envelope{TypeDM, ToUID: bob, Payload: ciphertext, Nonce})
+    Server->>Bob: WS Route to Bob(envelope{TypeDM, ...})
+    Note over Bob: Decrypt(ciphertext, nonce, alicePubKey, bobPrivKey)
+```
+
+#### Group Chat Fan-out Flow (Strategy A)
+This diagram illustrates how Alice encrypts a group message separately for Bob and Charlie (room members) and fans out the payload through the Server.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Alice
+    participant Server
+    actor Bob
+    actor Charlie
+
+    Alice->>Server: HTTP GET /rooms/general/keys
+    Server-->>Alice: Map of Room Members' Keys (Bob, Charlie, etc.)
+    Note over Alice: EncryptGroup(msg, alicePrivKey, {bob: bobPubKey, charlie: charliePubKey})
+    Alice->>Server: WS Send(envelope{TypeText, RoomID: general, EncryptedPayloads: {bob: epBob, charlie: epCharlie}})
+    par Server to Bob
+        Server->>Bob: WS Route to Room Member(envelope{TypeText, ...})
+        Note over Bob: Decrypt(epBob, alicePubKey, bobPrivKey)
+    and Server to Charlie
+        Server->>Charlie: WS Route to Room Member(envelope{TypeText, ...})
+        Note over Charlie: Decrypt(epCharlie, alicePubKey, charliePrivKey)
+    end
+```
+

@@ -129,7 +129,7 @@ func main() {
 	wsClient.PublicKey = pubKey
 	wsClient.PrivateKey = privKey
 
-	if err := wsClient.JoinRoom("general"); err != nil {
+	if err := wsClient.JoinRoom("general", ""); err != nil {
 		log.Fatalf("failed to join room and register public key: %v", err)
 	}
 

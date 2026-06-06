@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gorilla/websocket"
@@ -18,6 +20,7 @@ import (
 
 type WSClient struct {
 	conn       *websocket.Conn
+	connMu     sync.RWMutex
 	Program    *tea.Program
 	PrivateKey *[32]byte
 	PublicKey  *[32]byte
@@ -29,7 +32,13 @@ type WSClient struct {
 }
 
 func Connect(url string) (*WSClient, error) {
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	headers := http.Header{}
+	cfg, err := LoadConfig()
+	if err == nil && cfg.IDToken != "" {
+		headers.Set("Authorization", "Bearer "+cfg.IDToken)
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(url, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +50,7 @@ func Connect(url string) (*WSClient, error) {
 	}, nil
 }
 
-func (c *WSClient) JoinRoom(roomID string) error {
+func (c *WSClient) JoinRoom(roomID string, lastMsgID string) error {
 	c.roomIDMu.Lock()
 	c.roomID = roomID
 	c.roomIDMu.Unlock()
@@ -50,17 +59,36 @@ func (c *WSClient) JoinRoom(roomID string) error {
 		return fmt.Errorf("public key not set on client")
 	}
 	pubKeyBase64 := base64.StdEncoding.EncodeToString(c.PublicKey[:])
-	payload := fmt.Sprintf(`{"public_key":"%s"}`, pubKeyBase64)
+
+	type JoinPayload struct {
+		PublicKey string `json:"public_key"`
+		LastMsgID string `json:"last_msg_id,omitempty"`
+	}
+
+	pBytes, err := json.Marshal(JoinPayload{
+		PublicKey: pubKeyBase64,
+		LastMsgID: lastMsgID,
+	})
+	if err != nil {
+		return err
+	}
+
 	env := &types.Envelope{
 		Type:    types.TypeJoinRoom,
 		RoomID:  roomID,
-		Payload: payload,
+		Payload: string(pBytes),
 	}
 	data, err := types.Marshal(env)
 	if err != nil {
 		return err
 	}
-	return c.conn.WriteMessage(websocket.TextMessage, data)
+	c.connMu.RLock()
+	conn := c.conn
+	c.connMu.RUnlock()
+	if conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (c *WSClient) LeaveRoom(roomID string) error {
@@ -72,7 +100,13 @@ func (c *WSClient) LeaveRoom(roomID string) error {
 	if err != nil {
 		return err
 	}
-	return c.conn.WriteMessage(websocket.TextMessage, data)
+	c.connMu.RLock()
+	conn := c.conn
+	c.connMu.RUnlock()
+	if conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (c *WSClient) FetchRoomKeys(serverURL, roomID string) (map[string][]byte, error) {
@@ -193,7 +227,13 @@ func (c *WSClient) SendDM(recipientUID string, text string) error {
 		return err
 	}
 
-	return c.conn.WriteMessage(websocket.TextMessage, data)
+	c.connMu.RLock()
+	conn := c.conn
+	c.connMu.RUnlock()
+	if conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (c *WSClient) Send(text string) error {
@@ -233,12 +273,24 @@ func (c *WSClient) Send(text string) error {
 		return err
 	}
 
-	return c.conn.WriteMessage(websocket.TextMessage, data)
+	c.connMu.RLock()
+	conn := c.conn
+	c.connMu.RUnlock()
+	if conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (c *WSClient) Listen() {
+	c.connMu.RLock()
+	conn := c.conn
+	c.connMu.RUnlock()
+	if conn == nil {
+		return
+	}
 	for {
-		_, data, err := c.conn.ReadMessage()
+		_, data, err := conn.ReadMessage()
 		if err != nil {
 			if c.Program != nil {
 				c.Program.Send(WsDisconnectedMsg{})
@@ -248,5 +300,78 @@ func (c *WSClient) Listen() {
 		if c.Program != nil {
 			c.Program.Send(WsMessageMsg{Data: data})
 		}
+	}
+}
+
+func (c *WSClient) Connect(url string) error {
+	headers := http.Header{}
+	cfg, err := LoadConfig()
+	if err == nil && cfg.IDToken != "" {
+		headers.Set("Authorization", "Bearer "+cfg.IDToken)
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(url, headers)
+	if err != nil {
+		return err
+	}
+	c.connMu.Lock()
+	c.conn = conn
+	c.connMu.Unlock()
+	c.serverURL = url
+	return nil
+}
+
+func (c *WSClient) reconnectLoop(ctx context.Context) {
+	attempt := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		delay := Backoff(attempt, 1*time.Second, 60*time.Second)
+
+		// 13.3 — Re-Authenticate on Reconnect
+		cfg, err := LoadConfig()
+		if err == nil && cfg.IDToken != "" {
+			if IsTokenExpired(cfg.IDToken) {
+				newToken, newRefresh, refreshErr := RefreshFirebaseToken(cfg.APIKey, cfg.RefreshToken)
+				if refreshErr == nil {
+					cfg.IDToken = newToken
+					cfg.RefreshToken = newRefresh
+					_ = SaveConfig(cfg)
+				} else {
+					if c.Program != nil {
+						c.Program.Send(WsSessionExpiredMsg{})
+					}
+					return
+				}
+			}
+		}
+
+		if c.Program != nil {
+			c.Program.Send(WsReconnectingMsg{
+				Attempt: attempt,
+				Delay:   delay,
+			})
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+
+		err = c.Connect(c.serverURL)
+		if err == nil {
+			if c.Program != nil {
+				c.Program.Send(WsConnectedMsg{})
+			}
+			go c.Listen()
+			return
+		}
+
+		attempt++
 	}
 }

@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -23,6 +25,23 @@ type WsMessageMsg struct {
 
 type WsDisconnectedMsg struct{}
 
+type WsReconnectingMsg struct {
+	Attempt int
+	Delay   time.Duration
+}
+
+type WsSessionExpiredMsg struct{}
+
+type WsConnectedMsg struct{}
+
+type tickMsg time.Time
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
 type checkEncryptionMsg struct {
 	encrypted bool
 }
@@ -34,6 +53,13 @@ func checkEncryptionCmd(ws *WSClient, roomID string) tea.Cmd {
 			return checkEncryptionMsg{encrypted: false}
 		}
 		return checkEncryptionMsg{encrypted: true}
+	}
+}
+
+func joinRoomCmd(ws *WSClient, roomID, lastMsgID string) tea.Cmd {
+	return func() tea.Msg {
+		_ = ws.JoinRoom(roomID, lastMsgID)
+		return nil
 	}
 }
 
@@ -132,6 +158,13 @@ type ChatModel struct {
 	dmUnreadCounts  map[string]int
 	dmLastMessage   map[string]string
 	dmPartners      []string
+
+	// Day 13 Reconnection state
+	reconnecting       bool
+	reconnectAttempt   int
+	reconnectCountdown int
+	rooms              []string
+	lastMsgID          map[string]string
 }
 
 func NewChatModel(wsClient *WSClient, username string) ChatModel {
@@ -151,27 +184,32 @@ func NewChatModel(wsClient *WSClient, username string) ChatModel {
 	rList.SetFilteringEnabled(false)
 
 	return ChatModel{
-		input:           input,
-		viewport:        viewport.New(0, 0),
-		messages:        []string{},
-		users:           make(map[string]types.PresenceState),
-		userUIDs:        make(map[string]string),
-		wsClient:        wsClient,
-		status:          "Connected",
-		username:        username,
-		encrypted:       false,
-		focusedPanel:    PanelChat,
-		focusedSection:  SectionRooms,
-		selectedDMIndex: 0,
-		activeRoom:      "general",
-		mode:            ModeRoom,
-		roomsList:       rList,
-		roomHistory:     make(map[string][]string),
-		dmHistory:       make(map[string][]string),
-		unreadCounts:    make(map[string]int),
-		dmUnreadCounts:  make(map[string]int),
-		dmLastMessage:   make(map[string]string),
-		dmPartners:      []string{},
+		input:              input,
+		viewport:           viewport.New(0, 0),
+		messages:           []string{},
+		users:              make(map[string]types.PresenceState),
+		userUIDs:           make(map[string]string),
+		wsClient:           wsClient,
+		status:             "Connected",
+		username:           username,
+		encrypted:          false,
+		focusedPanel:       PanelChat,
+		focusedSection:     SectionRooms,
+		selectedDMIndex:    0,
+		activeRoom:         "general",
+		mode:               ModeRoom,
+		roomsList:          rList,
+		roomHistory:        make(map[string][]string),
+		dmHistory:          make(map[string][]string),
+		unreadCounts:       make(map[string]int),
+		dmUnreadCounts:     make(map[string]int),
+		dmLastMessage:      make(map[string]string),
+		dmPartners:         []string{},
+		reconnecting:       false,
+		reconnectAttempt:   0,
+		reconnectCountdown: 0,
+		rooms:              []string{"general"},
+		lastMsgID:          make(map[string]string),
 	}
 }
 
@@ -299,9 +337,10 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					selected := m.roomsList.SelectedItem().(roomItem)
 					if selected.name != m.activeRoom {
 						_ = m.wsClient.LeaveRoom(m.activeRoom)
-						_ = m.wsClient.JoinRoom(selected.name)
+						_ = m.wsClient.JoinRoom(selected.name, m.lastMsgID[selected.name])
 
 						m.activeRoom = selected.name
+						m.rooms = []string{selected.name}
 						m.mode = ModeRoom
 						m.dmTarget = ""
 
@@ -549,6 +588,7 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 				m.roomHistory[roomID] = append(m.roomHistory[roomID], display)
+				m.lastMsgID[roomID] = env.ID
 
 				if m.mode == ModeRoom && roomID == m.activeRoom {
 					m.messages = m.roomHistory[m.activeRoom]
@@ -566,12 +606,54 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case checkEncryptionMsg:
-		m.encrypted = msg.encrypted
-		return m, nil
-
 	case WsDisconnectedMsg:
 		m.status = "Offline"
+		if !m.reconnecting {
+			m.reconnecting = true
+			m.reconnectAttempt = 0
+			m.reconnectCountdown = 0
+			go m.wsClient.reconnectLoop(context.Background())
+		}
+		return m, nil
+
+	case WsReconnectingMsg:
+		m.reconnecting = true
+		m.reconnectAttempt = msg.Attempt
+		m.reconnectCountdown = int(msg.Delay.Seconds())
+		m.status = fmt.Sprintf("Reconnecting... (attempt %d)", msg.Attempt)
+		return m, tickCmd()
+
+	case WsSessionExpiredMsg:
+		m.status = "Session expired. Please log in again."
+		m.reconnecting = false
+		m.reconnectAttempt = 0
+		m.reconnectCountdown = 0
+		return m, nil
+
+	case WsConnectedMsg:
+		m.status = "Connected"
+		m.reconnecting = false
+		m.reconnectAttempt = 0
+		m.reconnectCountdown = 0
+
+		var cmds []tea.Cmd
+		for _, roomID := range m.rooms {
+			cmds = append(cmds, joinRoomCmd(m.wsClient, roomID, m.lastMsgID[roomID]))
+		}
+		cmds = append(cmds, checkEncryptionCmd(m.wsClient, m.activeRoom))
+		return m, tea.Batch(cmds...)
+
+	case tickMsg:
+		if m.reconnecting && m.reconnectCountdown > 0 {
+			m.reconnectCountdown--
+			if m.reconnectCountdown > 0 {
+				return m, tickCmd()
+			}
+		}
+		return m, nil
+
+	case checkEncryptionMsg:
+		m.encrypted = msg.encrypted
 		return m, nil
 	}
 
@@ -580,7 +662,17 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m ChatModel) View() string {
-	statusBar := renderStatusBar(m.status, m.encrypted || m.mode == ModeDM, m.activeRoom, m.mode, m.dmTarget, m.width)
+	statusBar := renderStatusBar(
+		m.status,
+		m.reconnecting,
+		m.reconnectAttempt,
+		m.reconnectCountdown,
+		m.encrypted || m.mode == ModeDM,
+		m.activeRoom,
+		m.mode,
+		m.dmTarget,
+		m.width,
+	)
 
 	var roomsHeader, dmsHeader string
 	focusedHeaderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
@@ -666,15 +758,18 @@ func renderDMList(m ChatModel) string {
 	return strings.Join(dmLines, "\n")
 }
 
-func renderStatusBar(status string, encrypted bool, room string, mode ChatMode, dmTarget string, width int) string {
+func renderStatusBar(status string, reconnecting bool, attempt, countdown int, encrypted bool, room string, mode ChatMode, dmTarget string, width int) string {
 	base := lipgloss.NewStyle().Width(width).Background(lipgloss.Color("236")).Foreground(lipgloss.Color("7"))
 
 	label := "Status: " + status
 	var statusColor lipgloss.Color
-	switch status {
-	case "Connected":
+	switch {
+	case reconnecting:
+		statusColor = lipgloss.Color("3")
+		label = fmt.Sprintf("Reconnecting... (attempt %d) | Retrying in %ds", attempt, countdown)
+	case status == "Connected":
 		statusColor = lipgloss.Color("2")
-	case "Offline":
+	case status == "Offline":
 		statusColor = lipgloss.Color("1")
 	default:
 		statusColor = lipgloss.Color("3")
