@@ -33,7 +33,7 @@ type WSClient struct {
 
 func Connect(url string) (*WSClient, error) {
 	headers := http.Header{}
-	cfg, err := LoadConfig()
+	cfg, err := LoadConfig(DefaultConfigPath())
 	if err == nil && cfg.IDToken != "" {
 		headers.Set("Authorization", "Bearer "+cfg.IDToken)
 	}
@@ -305,7 +305,7 @@ func (c *WSClient) Listen() {
 
 func (c *WSClient) Connect(url string) error {
 	headers := http.Header{}
-	cfg, err := LoadConfig()
+	cfg, err := LoadConfig(DefaultConfigPath())
 	if err == nil && cfg.IDToken != "" {
 		headers.Set("Authorization", "Bearer "+cfg.IDToken)
 	}
@@ -333,14 +333,14 @@ func (c *WSClient) reconnectLoop(ctx context.Context) {
 		delay := Backoff(attempt, 1*time.Second, 60*time.Second)
 
 		// 13.3 — Re-Authenticate on Reconnect
-		cfg, err := LoadConfig()
+		cfg, err := LoadConfig(DefaultConfigPath())
 		if err == nil && cfg.IDToken != "" {
 			if IsTokenExpired(cfg.IDToken) {
 				newToken, newRefresh, refreshErr := RefreshFirebaseToken(cfg.APIKey, cfg.RefreshToken)
 				if refreshErr == nil {
 					cfg.IDToken = newToken
 					cfg.RefreshToken = newRefresh
-					_ = SaveConfig(cfg)
+					_ = SaveConfig(cfg, DefaultConfigPath())
 				} else {
 					if c.Program != nil {
 						c.Program.Send(WsSessionExpiredMsg{})

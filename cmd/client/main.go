@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/joho/godotenv"
 
 	"github.com/Dubjay/sanctum/internal/crypto"
 	"github.com/Dubjay/sanctum/internal/tui"
@@ -27,11 +27,7 @@ func promptPassphrase(prompt string) (string, error) {
 }
 
 func main() {
-	var username string
-	fmt.Print("Enter username: ")
-	if _, err := fmt.Scan(&username); err != nil {
-		log.Fatalf("failed to read username: %v", err)
-	}
+	_ = godotenv.Load() // load environment variables for FIREBASE_API_KEY fallback
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -51,7 +47,7 @@ func main() {
 
 		var passphrase string
 		for {
-			p1, err := promptPassphrase("Create passphrase: ")
+			p1, err := promptPassphrase("Create passphrase to secure your E2EE keypair: ")
 			if err != nil {
 				log.Fatalf("failed to read passphrase: %v", err)
 			}
@@ -107,7 +103,7 @@ func main() {
 		copy(pubKeyArr[:], pubKeyBytes)
 		pubKey = &pubKeyArr
 
-		passphrase, passErr := promptPassphrase("Enter passphrase: ")
+		passphrase, passErr := promptPassphrase("Enter passphrase to decrypt your E2EE keys: ")
 		if passErr != nil {
 			log.Fatalf("failed to read passphrase: %v", passErr)
 		}
@@ -119,25 +115,18 @@ func main() {
 		}
 	}
 
-	wsURL := fmt.Sprintf("ws://localhost:8080/ws?name=%s&id=%s&room=general", url.QueryEscape(username), url.QueryEscape(username))
-	wsClient, err := tui.Connect(wsURL)
-	if err != nil {
-		log.Fatalf("failed to connect websocket: %v", err)
+	wsURL := "ws://localhost:8080/ws"
+	
+	// Load ServerURL from config if defined
+	cfgPath := tui.DefaultConfigPath()
+	if cfg, err := tui.LoadConfig(cfgPath); err == nil && cfg.ServerURL != "" {
+		wsURL = cfg.ServerURL
 	}
 
-	// Store keypair in memory for the session
-	wsClient.PublicKey = pubKey
-	wsClient.PrivateKey = privKey
-
-	if err := wsClient.JoinRoom("general", ""); err != nil {
-		log.Fatalf("failed to join room and register public key: %v", err)
-	}
-
-	model := tui.NewChatModel(wsClient, username)
+	pHolder := &tui.ProgramHolder{}
+	model := tui.NewAppModel(wsURL, pubKey, privKey, pHolder)
 	program := tea.NewProgram(model, tea.WithAltScreen())
-	wsClient.Program = program
-
-	go wsClient.Listen()
+	pHolder.P = program
 
 	if _, err := program.Run(); err != nil {
 		log.Fatalf("program exited with error: %v", err)

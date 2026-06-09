@@ -40,6 +40,7 @@ type Hub struct {
 	presenceUpdates  chan PresenceUpdateMsg
 	register         chan *Client
 	unregister       chan *Client
+	persistence      chan types.Envelope
 	done             chan struct{}
 }
 
@@ -55,6 +56,7 @@ func NewHub() *Hub {
 		presenceUpdates:  make(chan PresenceUpdateMsg, 128),
 		register:         make(chan *Client),
 		unregister:       make(chan *Client),
+		persistence:      make(chan types.Envelope, 1024),
 		done:             make(chan struct{}),
 	}
 }
@@ -186,10 +188,20 @@ func (h *Hub) RunWithContext(ctx context.Context) {
 						h.closeClient(roomClient)
 					}
 				}
+				select {
+				case h.persistence <- *msg.Envelope:
+				default:
+				}
 				continue
 			}
 
 			if msg.Envelope.Type == types.TypeDM {
+				if msg.Envelope.ID == "" {
+					msg.Envelope.ID = uuid.New().String()
+				}
+				if msg.Envelope.Timestamp == 0 {
+					msg.Envelope.Timestamp = time.Now().UnixMilli()
+				}
 				payload, err := types.Marshal(msg.Envelope)
 				if err != nil {
 					continue
@@ -213,6 +225,10 @@ func (h *Hub) RunWithContext(ctx context.Context) {
 							h.closeClient(msg.Sender)
 						}
 					}
+					select {
+					case h.persistence <- *msg.Envelope:
+					default:
+					}
 					continue
 				}
 
@@ -228,6 +244,10 @@ func (h *Hub) RunWithContext(ctx context.Context) {
 					}
 					delete(h.clients, recipient.ID)
 					h.closeClient(recipient)
+				}
+				select {
+				case h.persistence <- *msg.Envelope:
+				default:
 				}
 				continue
 			}
@@ -363,4 +383,8 @@ func (h *Hub) closeClient(client *Client) {
 		client.cancel()
 	}
 	close(client.send)
+}
+
+func (h *Hub) SetPersistenceChan(c chan types.Envelope) {
+	h.persistence = c
 }

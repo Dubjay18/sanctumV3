@@ -12,46 +12,51 @@ import (
 	"time"
 )
 
-// Config represents the client-side Firebase session configuration.
+// Config represents the client-side session configuration.
 type Config struct {
-	APIKey       string `json:"api_key"`
+	ServerURL    string `json:"server_url"`
+	UID          string `json:"uid"`
+	DisplayName  string `json:"display_name"`
 	IDToken      string `json:"id_token"`
 	RefreshToken string `json:"refresh_token"`
+	AIProvider   string `json:"ai_provider"`
+	AIAPIKey     string `json:"ai_api_key"`
+	APIKey       string `json:"api_key"`
 }
 
-// LoadConfig loads the client configuration from ~/.sanctum/config.json.
-func LoadConfig() (*Config, error) {
+// DefaultConfigPath returns the default configuration file path (~/.sanctum/config.json).
+func DefaultConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		return ""
 	}
-	path := filepath.Join(home, ".sanctum", "config.json")
+	return filepath.Join(home, ".sanctum", "config.json")
+}
+
+// LoadConfig loads the client configuration from the specified path.
+// It returns an empty Config if the file does not exist.
+func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &Config{}, nil
+			return Config{}, nil
 		}
-		return nil, err
+		return Config{}, err
 	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
+		return Config{}, err
 	}
-	return &cfg, nil
+	return cfg, nil
 }
 
-// SaveConfig saves the client configuration to ~/.sanctum/config.json with 0600 permissions.
-func SaveConfig(cfg *Config) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	dir := filepath.Join(home, ".sanctum")
+// SaveConfig saves the client configuration to the specified path.
+func SaveConfig(config Config, path string) error {
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "config.json")
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return err
 	}

@@ -1,18 +1,44 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 
+	"github.com/Dubjay/sanctum/internal/firebase"
 	"github.com/Dubjay/sanctum/internal/hub"
+	"github.com/Dubjay/sanctum/internal/persistence"
 
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	_ = godotenv.Load()
+	credentialsPath := os.Getenv("FIREBASE_CREDENTIALS_PATH")
+	if credentialsPath == "" {
+		credentialsPath = "./secrets/credentials.json"
+	}
+
+	log.Printf("Initializing Firebase client using credentials from: %s", credentialsPath)
+	fsClient, authClient, err := firebase.InitFirebase(credentialsPath)
+	if err != nil {
+		log.Fatalf("Failed to initialize Firebase: %v", err)
+	}
+	defer fsClient.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	chatHub := hub.NewHub()
+
+	worker := persistence.NewWorker(fsClient, 1024)
+	chatHub.SetPersistenceChan(worker.Queue())
+	worker.Start(ctx)
+
 	go chatHub.Run()
 
 	mux := http.NewServeMux()
@@ -60,7 +86,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(responseKeys)
 	})
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+	wsHandler := func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -69,27 +95,25 @@ func main() {
 			},
 		}
 
+		uid, _ := r.Context().Value(firebase.ContextKeyUID).(string)
+		name, _ := r.Context().Value(firebase.ContextKeyName).(string)
+		if name == "" {
+			name = uid
+		}
+
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("websocket upgrade failed: %v", err)
 			return
 		}
 
-		log.Printf("client connected from %s", r.RemoteAddr)
+		log.Printf("client connected: uid=%s, name=%s, remote=%s", uid, name, r.RemoteAddr)
 
-		clientName := r.URL.Query().Get("name")
-		if clientName == "" {
-			clientName = r.RemoteAddr
-		}
-
-		clientID := r.URL.Query().Get("id")
-		if clientID == "" {
-			clientID = clientName
-		}
-
-		client := hub.NewClient(chatHub, conn, clientID, clientName, r.URL.Query().Get("room"))
+		client := hub.NewClient(chatHub, conn, uid, name, r.URL.Query().Get("room"))
 		client.Start()
-	})
+	}
+
+	mux.HandleFunc("/ws", firebase.AuthMiddleware(authClient, wsHandler))
 
 	http.ListenAndServe(":8080", mux)
 }
