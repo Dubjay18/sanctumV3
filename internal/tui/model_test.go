@@ -16,7 +16,7 @@ import (
 
 func TestChatModel_Update_Resize(t *testing.T) {
 	wsClient := &WSClient{}
-	model := NewChatModel(wsClient, "Alice")
+	model := NewChatModel(wsClient, "Alice", "Alice", nil, nil)
 
 	// Test standard resizing
 	msg := tea.WindowSizeMsg{Width: 80, Height: 24}
@@ -50,7 +50,7 @@ func TestChatModel_Update_Resize(t *testing.T) {
 
 func TestChatModel_Update_WsMessages(t *testing.T) {
 	wsClient := &WSClient{}
-	model := NewChatModel(wsClient, "Alice")
+	model := NewChatModel(wsClient, "Alice", "Alice", nil, nil)
 
 	// Test regular text message envelope
 	env := &types.Envelope{
@@ -66,7 +66,7 @@ func TestChatModel_Update_WsMessages(t *testing.T) {
 	newModel, _ := model.Update(WsMessageMsg{Data: envBytes})
 	chatModel := newModel.(ChatModel)
 
-	if len(chatModel.messages) != 1 || chatModel.messages[0] != "Bob: Hello Alice" {
+	if len(chatModel.messages) != 1 || chatModel.messages[0].Content != "Bob: Hello Alice" {
 		t.Errorf("expected message 'Bob: Hello Alice', got %v", chatModel.messages)
 	}
 
@@ -100,7 +100,7 @@ func TestChatModel_Update_WsMessages(t *testing.T) {
 
 func TestChatModel_Update_Keys(t *testing.T) {
 	wsClient := &WSClient{}
-	model := NewChatModel(wsClient, "Alice")
+	model := NewChatModel(wsClient, "Alice", "Alice", nil, nil)
 
 	// Enter key (sending empty message should not fail or send)
 	newModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -175,7 +175,7 @@ func TestTUI_E2EDM(t *testing.T) {
 	}
 	bobWS.keyring["alice"] = pubAlice[:]
 
-	bobModel := NewChatModel(bobWS, "Bob")
+	bobModel := NewChatModel(bobWS, "Bob", "Bob", nil, nil)
 	bobModel.mode = ModeDM
 	bobModel.dmTarget = "alice"
 
@@ -215,8 +215,8 @@ func TestTUI_E2EDM(t *testing.T) {
 	}
 
 	expectedMsg := "DM from alice: hello bob, this is encrypted!"
-	if chatModel.messages[0] != expectedMsg {
-		t.Errorf("expected %q, got %q", expectedMsg, chatModel.messages[0])
+	if chatModel.messages[0].Content != expectedMsg {
+		t.Errorf("expected %q, got %q", expectedMsg, chatModel.messages[0].Content)
 	}
 
 	// 6. Test decryption failure (e.g. tampered payload)
@@ -231,8 +231,8 @@ func TestTUI_E2EDM(t *testing.T) {
 	}
 
 	// The decryption error should be displayed (and contain "[decryption failed]")
-	if !strings.Contains(chatModel2.messages[1], "[decryption failed]") {
-		t.Errorf("expected message to indicate decryption failure, got: %q", chatModel2.messages[1])
+	if !strings.Contains(chatModel2.messages[1].Content, "[decryption failed]") {
+		t.Errorf("expected message to indicate decryption failure, got: %q", chatModel2.messages[1].Content)
 	}
 }
 
@@ -249,7 +249,7 @@ func TestTUI_GroupEncryptionAndPolish(t *testing.T) {
 	}
 	bobWS.keyring["alice"] = pubAlice[:]
 
-	bobModel := NewChatModel(bobWS, "Bob")
+	bobModel := NewChatModel(bobWS, "Bob", "Bob", nil, nil)
 
 	// 3. Test Tab key focuses panel toggle
 	if bobModel.focusedPanel != PanelChat {
@@ -303,8 +303,8 @@ func TestTUI_GroupEncryptionAndPolish(t *testing.T) {
 	if len(bobModel.messages) != 1 {
 		t.Fatalf("expected 1 message in general room history, got %d", len(bobModel.messages))
 	}
-	if !strings.Contains(bobModel.messages[0], "secret group content") {
-		t.Errorf("expected Bob to decrypt group message, got: %q", bobModel.messages[0])
+	if !strings.Contains(bobModel.messages[0].Content, "secret group content") {
+		t.Errorf("expected Bob to decrypt group message, got: %q", bobModel.messages[0].Content)
 	}
 
 	// 6. Test group decryption (Bob is NOT a recipient)
@@ -330,8 +330,8 @@ func TestTUI_GroupEncryptionAndPolish(t *testing.T) {
 	if len(bobModel.messages) != 2 {
 		t.Fatalf("expected 2 messages in general room history, got %d", len(bobModel.messages))
 	}
-	if !strings.Contains(bobModel.messages[1], "[message not for you]") {
-		t.Errorf("expected Bob to receive 'not for you' indicator, got: %q", bobModel.messages[1])
+	if !strings.Contains(bobModel.messages[1].Content, "[message not for you]") {
+		t.Errorf("expected Bob to receive 'not for you' indicator, got: %q", bobModel.messages[1].Content)
 	}
 
 	// 7. Test unread badge increments on receiving message in background room

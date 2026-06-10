@@ -21,6 +21,7 @@ type Config struct {
 	RefreshToken string `json:"refresh_token"`
 	AIProvider   string `json:"ai_provider"`
 	AIAPIKey     string `json:"ai_api_key"`
+	AIWarned     bool   `json:"ai_warned"`
 	APIKey       string `json:"api_key"`
 }
 

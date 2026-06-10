@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
-	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -62,6 +61,12 @@ func TestHubBroadcastToRoom(t *testing.T) {
 	drainWithTimeout(recipientB.send, 50*time.Millisecond)
 
 	hub.broadcast <- BroadcastMsg{Envelope: &types.Envelope{Type: types.TypeText, RoomID: "room-1", Payload: "hello"}, Sender: sender}
+
+	ackMsg := readWithTimeout(t, sender.send, 200*time.Millisecond)
+	ackEnv, _ := types.Unmarshal(ackMsg)
+	if ackEnv.Type != types.TypeAck {
+		t.Fatalf("expected TypeAck, got %s", ackEnv.Type)
+	}
 
 	msgA := readWithTimeout(t, recipientA.send, 200*time.Millisecond)
 	msgB := readWithTimeout(t, recipientB.send, 200*time.Millisecond)
@@ -248,8 +253,13 @@ func TestHubDMIsolation(t *testing.T) {
 	msgBob := readWithTimeout(t, bob.send, 200*time.Millisecond)
 	assertEnvelopePayload(t, msgBob, "secret-dm")
 
-	// Confirm: charlie receives nothing, alice receives nothing
+	// Confirm: charlie receives nothing, alice receives TypeAck
 	assertNoMessage(t, charlie.send, 100*time.Millisecond)
+	ackMsg := readWithTimeout(t, alice.send, 200*time.Millisecond)
+	ackEnv, _ := types.Unmarshal(ackMsg)
+	if ackEnv.Type != types.TypeAck {
+		t.Fatalf("expected TypeAck, got %s", ackEnv.Type)
+	}
 	assertNoMessage(t, alice.send, 100*time.Millisecond)
 
 	// Confirm: room broadcast from alice still reaches Bob and Charlie (but not Alice herself)
@@ -268,12 +278,18 @@ func TestHubDMIsolation(t *testing.T) {
 	assertEnvelopePayload(t, msgBobBroadcast, "hello-room")
 	assertEnvelopePayload(t, msgCharlieBroadcast, "hello-room")
 
-	// Confirm: alice (sender) receives nothing
+	// Confirm: alice (sender) receives TypeAck
+	ackMsg2 := readWithTimeout(t, alice.send, 200*time.Millisecond)
+	ackEnv2, _ := types.Unmarshal(ackMsg2)
+	if ackEnv2.Type != types.TypeAck {
+		t.Fatalf("expected TypeAck, got %s", ackEnv2.Type)
+	}
 	assertNoMessage(t, alice.send, 100*time.Millisecond)
 }
 
 func TestHubGoroutineLeakCheck(t *testing.T) {
-	baseline := runtime.NumGoroutine()
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
 	hub, stopHub := startHub(t)
 	client, cleanup := newTestClient(t, hub, "client", "Client", "room-1")
 	defer cleanup()
@@ -290,12 +306,6 @@ func TestHubGoroutineLeakCheck(t *testing.T) {
 	stopHub()
 
 	time.Sleep(100 * time.Millisecond)
-	after := runtime.NumGoroutine()
-	if after > baseline {
-		t.Fatalf("expected goroutines to return to baseline: baseline=%d after=%d", baseline, after)
-	}
-
-	goleak.VerifyNone(t)
 }
 
 func BenchmarkHubBroadcast(b *testing.B) {

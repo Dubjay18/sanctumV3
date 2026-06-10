@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -86,11 +87,27 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wsClient.Program = m.pHolder.P
 		}
 
-		// Join general room
-		_ = m.wsClient.JoinRoom("general", "")
+		var initialRoomItems []list.Item
+		var roomIDs []string
+		if rooms, err := wsClient.FetchUserRooms(m.wsURL, msg.UID, msg.IDToken); err == nil && len(rooms) > 0 {
+			for _, r := range rooms {
+				initialRoomItems = append(initialRoomItems, roomItem{id: r.ID, name: r.Name})
+				roomIDs = append(roomIDs, r.ID)
+			}
+		} else {
+			initialRoomItems = []list.Item{
+				roomItem{id: "general", name: "general"},
+				roomItem{id: "random", name: "random"},
+				roomItem{id: "lounge", name: "lounge"},
+			}
+			roomIDs = []string{"general", "random", "lounge"}
+		}
+
+		// Join first room
+		_ = m.wsClient.JoinRoom(roomIDs[0], "")
 
 		// Initialize ChatModel
-		m.chat = NewChatModel(m.wsClient, m.username)
+		m.chat = NewChatModel(m.wsClient, m.username, msg.UID, initialRoomItems, roomIDs)
 		if m.width > 0 && m.height > 0 {
 			// Pre-size chat components if size was received earlier
 			m.chat.width = m.width

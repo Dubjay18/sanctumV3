@@ -12,6 +12,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"github.com/Dubjay/sanctum/internal/crypto"
@@ -96,6 +97,20 @@ func (c *WSClient) LeaveRoom(roomID string) error {
 		Type:   types.TypeLeaveRoom,
 		RoomID: roomID,
 	}
+	data, err := types.Marshal(env)
+	if err != nil {
+		return err
+	}
+	c.connMu.RLock()
+	conn := c.conn
+	c.connMu.RUnlock()
+	if conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	return conn.WriteMessage(websocket.TextMessage, data)
+}
+
+func (c *WSClient) SendEnvelope(env *types.Envelope) error {
 	data, err := types.Marshal(env)
 	if err != nil {
 		return err
@@ -199,11 +214,11 @@ func (c *WSClient) FetchPublicKey(serverURL, uid string) ([]byte, error) {
 	return pubKeyBytes, nil
 }
 
-func (c *WSClient) SendDM(recipientUID string, text string) error {
+func (c *WSClient) SendDM(recipientUID string, text string) (string, error) {
 	// Fetch recipient's public key
 	pubKeyBytes, err := c.FetchPublicKey(c.serverURL, recipientUID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch public key for %s: %w", recipientUID, err)
+		return "", fmt.Errorf("failed to fetch public key for %s: %w", recipientUID, err)
 	}
 
 	var theirPubKey [32]byte
@@ -212,10 +227,12 @@ func (c *WSClient) SendDM(recipientUID string, text string) error {
 	// Encrypt the DM
 	ciphertext, nonce, err := crypto.EncryptDM([]byte(text), c.PrivateKey, &theirPubKey)
 	if err != nil {
-		return fmt.Errorf("failed to encrypt DM: %w", err)
+		return "", fmt.Errorf("failed to encrypt DM: %w", err)
 	}
 
+	msgID := uuid.New().String()
 	env := &types.Envelope{
+		ID:      msgID,
 		Type:    types.TypeDM,
 		ToUID:   recipientUID,
 		Payload: base64.StdEncoding.EncodeToString(ciphertext),
@@ -224,19 +241,19 @@ func (c *WSClient) SendDM(recipientUID string, text string) error {
 
 	data, err := types.Marshal(env)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	c.connMu.RLock()
 	conn := c.conn
 	c.connMu.RUnlock()
 	if conn == nil {
-		return fmt.Errorf("not connected")
+		return "", fmt.Errorf("not connected")
 	}
-	return conn.WriteMessage(websocket.TextMessage, data)
+	return msgID, conn.WriteMessage(websocket.TextMessage, data)
 }
 
-func (c *WSClient) Send(text string) error {
+func (c *WSClient) Send(text string) (string, error) {
 	c.roomIDMu.RLock()
 	roomID := c.roomID
 	c.roomIDMu.RUnlock()
@@ -259,7 +276,9 @@ func (c *WSClient) Send(text string) error {
 		}
 	}
 
+	msgID := uuid.New().String()
 	env := &types.Envelope{
+		ID:                msgID,
 		Type:              types.TypeText,
 		Payload:           text,
 		RoomID:            roomID,
@@ -270,16 +289,16 @@ func (c *WSClient) Send(text string) error {
 	}
 	data, err := types.Marshal(env)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	c.connMu.RLock()
 	conn := c.conn
 	c.connMu.RUnlock()
 	if conn == nil {
-		return fmt.Errorf("not connected")
+		return "", fmt.Errorf("not connected")
 	}
-	return conn.WriteMessage(websocket.TextMessage, data)
+	return msgID, conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (c *WSClient) Listen() {
@@ -375,3 +394,38 @@ func (c *WSClient) reconnectLoop(ctx context.Context) {
 		attempt++
 	}
 }
+
+func (c *WSClient) FetchUserRooms(serverURL, uid, token string) ([]types.Room, error) {
+	httpURL := serverURL
+	if strings.HasPrefix(httpURL, "ws://") {
+		httpURL = "http://" + strings.TrimPrefix(httpURL, "ws://")
+	} else if strings.HasPrefix(httpURL, "wss://") {
+		httpURL = "https://" + strings.TrimPrefix(httpURL, "wss://")
+	}
+	httpURL = strings.TrimSuffix(httpURL, "/ws")
+
+	urlStr := fmt.Sprintf("%s/users/%s/rooms", httpURL, url.PathEscape(uid))
+
+	req, err := http.NewRequest("GET", urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
+	}
+
+	var rooms []types.Room
+	if err := json.NewDecoder(resp.Body).Decode(&rooms); err != nil {
+		return nil, err
+	}
+	return rooms, nil
+}
+

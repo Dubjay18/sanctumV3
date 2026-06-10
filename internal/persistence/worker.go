@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/Dubjay/sanctum/pkg/types"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type FirestoreEncryptedPayload struct {
@@ -19,12 +22,14 @@ type FirestoreEncryptedPayload struct {
 
 type FirestoreRoomMessage struct {
 	ID                string                               `firestore:"id"`
+	Type              string                               `firestore:"type,omitempty"`
 	FromUID           string                               `firestore:"from_uid"`
 	FromName          string                               `firestore:"from_name"`
 	EncryptedPayloads map[string]FirestoreEncryptedPayload `firestore:"encrypted_payloads"`
 	Timestamp         time.Time                            `firestore:"timestamp,serverTimestamp"`
 	RoomID            string                               `firestore:"room_id"`
 	Nonce             string                               `firestore:"nonce,omitempty"`
+	Payload           string                               `firestore:"payload,omitempty"`
 }
 
 type FirestoreDMMessage struct {
@@ -38,6 +43,7 @@ type FirestoreDMMessage struct {
 type Worker struct {
 	fsClient *firestore.Client
 	queue    chan types.Envelope
+	wg       sync.WaitGroup
 }
 
 // NewWorker initializes a new persistence Worker with the given Firestore client and buffer size.
@@ -64,21 +70,28 @@ func (w *Worker) Start(ctx context.Context) {
 				if !ok {
 					return
 				}
+				w.wg.Add(1)
 				go func(e types.Envelope) {
+					defer w.wg.Done()
 					var err error
-					if e.Type == types.TypeText {
+					if e.Type == types.TypeText || e.Type == types.TypeAIMessage {
 						err = w.persistRoomMessage(ctx, e)
 					} else if e.Type == types.TypeDM {
 						err = w.persistDMMessage(ctx, e)
 					}
 					if err != nil {
 						envJSON, _ := json.Marshal(e)
-						log.Printf("PERSISTENCE_FAILURE: failed to persist envelope after retries: %v. Envelope: %s", err, string(envJSON))
+						slog.ErrorContext(ctx, "PERSISTENCE_FAILURE: failed to persist envelope after retries", "error", err, "envelope", string(envJSON))
 					}
 				}(env)
 			}
 		}
 	}()
+}
+
+// Wait blocks until all active background persistence writes have completed.
+func (w *Worker) Wait() {
+	w.wg.Wait()
 }
 
 func (w *Worker) persistRoomMessage(ctx context.Context, env types.Envelope) error {
@@ -101,11 +114,13 @@ func (w *Worker) persistRoomMessage(ctx context.Context, env types.Envelope) err
 
 	dbMsg := FirestoreRoomMessage{
 		ID:                docID,
+		Type:              string(env.Type),
 		FromUID:           env.FromUID,
 		FromName:          env.FromName,
 		EncryptedPayloads: payloads,
 		RoomID:            roomID,
 		Nonce:             env.Nonce,
+		Payload:           env.Payload,
 	}
 
 	ref := w.fsClient.Collection("rooms").Doc(roomID).Collection("messages").Doc(docID)
@@ -149,6 +164,14 @@ func (w *Worker) setWithRetry(ctx context.Context, ref *firestore.DocumentRef, d
 		if err == nil {
 			return nil
 		}
+
+		if st, ok := status.FromError(err); ok {
+			code := st.Code()
+			if code == codes.PermissionDenied || code == codes.NotFound || code == codes.InvalidArgument {
+				return err
+			}
+		}
+
 		if i < 5 {
 			select {
 			case <-ctx.Done():

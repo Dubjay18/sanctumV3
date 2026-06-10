@@ -1,6 +1,9 @@
 package types
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 type MessageType string
 
@@ -18,6 +21,8 @@ const (
 	TypeDeliveredAck   MessageType = "delivered_ack"
 	TypeReadAck        MessageType = "read_ack"
 	TypeAIMessage      MessageType = "ai_message"
+	TypeCreateRoom     MessageType = "create_room"
+	TypeInvite         MessageType = "invite"
 )
 
 const (
@@ -89,3 +94,13 @@ func Unmarshal(data []byte) (*Envelope, error) {
 	}
 	return &env, nil
 }
+
+type Room struct {
+	ID         string    `json:"id" firestore:"id"`
+	Name       string    `json:"name" firestore:"name"`
+	CreatedBy  string    `json:"created_by" firestore:"created_by"`
+	CreatedAt  time.Time `json:"created_at" firestore:"created_at"`
+	MemberUIDs []string  `json:"member_uids" firestore:"member_uids"`
+	IsPrivate  bool      `json:"is_private" firestore:"is_private"`
+}
+

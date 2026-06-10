@@ -8,6 +8,14 @@ import (
 	"os"
 )
 
+// getAuthHost returns the dynamic protocol and host based on FIREBASE_AUTH_EMULATOR_HOST if set.
+func getAuthHost(defaultHost string) string {
+	if host := os.Getenv("FIREBASE_AUTH_EMULATOR_HOST"); host != "" {
+		return "http://" + host + "/" + defaultHost
+	}
+	return "https://" + defaultHost
+}
+
 // getAPIKey retrieves the Firebase Auth API key from the environment or configuration.
 func getAPIKey() string {
 	apiKey := os.Getenv("FIREBASE_API_KEY")
@@ -15,6 +23,10 @@ func getAPIKey() string {
 		if cfg, err := LoadConfig(DefaultConfigPath()); err == nil && cfg.APIKey != "" {
 			apiKey = cfg.APIKey
 		}
+	}
+	// Fallback for emulator (API key doesn't matter, but cannot be blank in helpers)
+	if apiKey == "" && os.Getenv("FIREBASE_AUTH_EMULATOR_HOST") != "" {
+		apiKey = "dummy-api-key"
 	}
 	return apiKey
 }
@@ -26,7 +38,7 @@ func SignIn(email, password string) (idToken, refreshToken, uid string, err erro
 		return "", "", "", fmt.Errorf("FIREBASE_API_KEY is not configured")
 	}
 
-	apiURL := fmt.Sprintf("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=%s", apiKey)
+	apiURL := fmt.Sprintf("%s/v1/accounts:signInWithPassword?key=%s", getAuthHost("identitytoolkit.googleapis.com"), apiKey)
 
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"email":             email,
@@ -77,7 +89,7 @@ func Register(email, password, displayName string) (idToken, refreshToken, uid s
 	}
 
 	// 1. Sign Up
-	signUpURL := fmt.Sprintf("https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=%s", apiKey)
+	signUpURL := fmt.Sprintf("%s/v1/accounts:signUp?key=%s", getAuthHost("identitytoolkit.googleapis.com"), apiKey)
 	signUpBody, err := json.Marshal(map[string]interface{}{
 		"email":             email,
 		"password":          password,
@@ -117,7 +129,7 @@ func Register(email, password, displayName string) (idToken, refreshToken, uid s
 	}
 
 	// 2. Set Display Name
-	updateURL := fmt.Sprintf("https://identitytoolkit.googleapis.com/v1/accounts:update?key=%s", apiKey)
+	updateURL := fmt.Sprintf("%s/v1/accounts:update?key=%s", getAuthHost("identitytoolkit.googleapis.com"), apiKey)
 	updateBody, err := json.Marshal(map[string]interface{}{
 		"idToken":           signUpRes.IDToken,
 		"displayName":       displayName,
@@ -153,12 +165,11 @@ func Register(email, password, displayName string) (idToken, refreshToken, uid s
 		return signUpRes.IDToken, signUpRes.RefreshToken, signUpRes.LocalID, fmt.Errorf("failed to set display name: %s", errMsg)
 	}
 
-	var updateRes struct {
-		IDToken      string `json:"idToken"`
-		RefreshToken string `json:"refreshToken"`
-	}
-	if err := json.NewDecoder(updateResp.Body).Decode(&updateRes); err == nil {
-		return updateRes.IDToken, updateRes.RefreshToken, signUpRes.LocalID, nil
+
+	// 3. Sign in again to get a fresh token containing the display name claim
+	signInToken, signInRefresh, _, err := SignIn(email, password)
+	if err == nil && signInToken != "" {
+		return signInToken, signInRefresh, signUpRes.LocalID, nil
 	}
 
 	return signUpRes.IDToken, signUpRes.RefreshToken, signUpRes.LocalID, nil
@@ -171,7 +182,7 @@ func RefreshToken(refreshToken string) (newIDToken string, err error) {
 		return "", fmt.Errorf("FIREBASE_API_KEY is not configured")
 	}
 
-	apiURL := fmt.Sprintf("https://securetoken.googleapis.com/v1/token?key=%s", apiKey)
+	apiURL := fmt.Sprintf("%s/v1/token?key=%s", getAuthHost("securetoken.googleapis.com"), apiKey)
 
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"grant_type":    "refresh_token",

@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 
 	"github.com/Dubjay/sanctum/internal/firebase"
 	"github.com/Dubjay/sanctum/internal/hub"
+	"github.com/Dubjay/sanctum/internal/logging"
 	"github.com/Dubjay/sanctum/internal/persistence"
 
 	"github.com/gorilla/websocket"
@@ -17,23 +18,28 @@ import (
 )
 
 func main() {
+	baseHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+	slog.SetDefault(slog.New(logging.NewRedactingHandler(baseHandler)))
+
 	_ = godotenv.Load()
 	credentialsPath := os.Getenv("FIREBASE_CREDENTIALS_PATH")
 	if credentialsPath == "" {
 		credentialsPath = "./secrets/credentials.json"
 	}
 
-	log.Printf("Initializing Firebase client using credentials from: %s", credentialsPath)
-	fsClient, authClient, err := firebase.InitFirebase(credentialsPath)
-	if err != nil {
-		log.Fatalf("Failed to initialize Firebase: %v", err)
-	}
-	defer fsClient.Close()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	slog.InfoContext(ctx, "Initializing Firebase client", slog.String("credentials_path", credentialsPath))
+	fsClient, authClient, err := firebase.InitFirebase(credentialsPath)
+	if err != nil {
+		slog.ErrorContext(ctx, "Failed to initialize Firebase", slog.Any("error", err))
+		os.Exit(1)
+	}
+	defer fsClient.Close()
+
 	chatHub := hub.NewHub()
+	chatHub.SetFirestoreClient(fsClient)
 
 	worker := persistence.NewWorker(fsClient, 1024)
 	chatHub.SetPersistenceChan(worker.Queue())
@@ -46,6 +52,28 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
+	mux.HandleFunc("GET /users/{uid}/rooms", firebase.AuthMiddleware(authClient, func(w http.ResponseWriter, r *http.Request) {
+		uid := r.PathValue("uid")
+		if uid == "" {
+			http.Error(w, "missing uid", http.StatusBadRequest)
+			return
+		}
+
+		tokenUID, _ := r.Context().Value(firebase.ContextKeyUID).(string)
+		if tokenUID != uid {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		rooms, err := firebase.FetchUserRooms(r.Context(), fsClient, uid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(rooms)
+	}))
 	mux.HandleFunc("GET /keys/{uid}", func(w http.ResponseWriter, r *http.Request) {
 		uid := r.PathValue("uid")
 		if uid == "" {
@@ -103,11 +131,15 @@ func main() {
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			log.Printf("websocket upgrade failed: %v", err)
+			slog.WarnContext(r.Context(), "websocket upgrade failed", slog.Any("error", err))
 			return
 		}
 
-		log.Printf("client connected: uid=%s, name=%s, remote=%s", uid, name, r.RemoteAddr)
+		slog.InfoContext(r.Context(), "client connected",
+			slog.String("uid", uid),
+			slog.String("name", name),
+			slog.String("remote", r.RemoteAddr),
+		)
 
 		client := hub.NewClient(chatHub, conn, uid, name, r.URL.Query().Get("room"))
 		client.Start()
